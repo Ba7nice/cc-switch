@@ -94,7 +94,7 @@ fn wait_for_hub(started_at: SystemTime, timeout: Duration) -> Result<PathBuf, St
                         return None;
                     }
                     let modified = entry.metadata().ok()?.modified().ok()?;
-                    (modified + Duration::from_secs(2) >= started_at).then_some((modified, path))
+                    (modified >= started_at).then_some((modified, path))
                 })
                 .collect();
             candidates.sort_by_key(|(modified, _)| *modified);
@@ -266,7 +266,7 @@ fn wait_for_devtools(started_at: SystemTime, timeout: Duration) -> Result<u16, S
     loop {
         if let Ok(metadata) = fs::metadata(&path) {
             if let Ok(modified) = metadata.modified() {
-                if modified + Duration::from_secs(2) >= started_at {
+                if modified >= started_at {
                     if let Ok(raw) = fs::read_to_string(&path) {
                         if let Some(port) =
                             raw.lines().next().and_then(|line| line.trim().parse().ok())
