@@ -259,6 +259,11 @@ fn build_bridge_script(bridge: &BridgeConfig, models: &[ModelChoice]) -> String 
         bridge.proxy_url.trim_end_matches('/')
     ))
     .to_string();
+    let metrics_url = Value::String(format!(
+        "{}/__ccswitch_metrics",
+        bridge.proxy_url.trim_end_matches('/')
+    ))
+    .to_string();
 
     let mut script = String::new();
     script.push_str("(() => {\n  if (window.__ccModelBridge) return;\n  const CFG = ");
@@ -267,6 +272,8 @@ fn build_bridge_script(bridge: &BridgeConfig, models: &[ModelChoice]) -> String 
     script.push_str(&selection_json);
     script.push_str(";\n  const SELECT_URL = ");
     script.push_str(&select_url);
+    script.push_str(";\n  const METRICS_URL = ");
+    script.push_str(&metrics_url);
     script.push_str(
         r#";
   window.__ccModelBridge = true;
@@ -275,6 +282,38 @@ fn build_bridge_script(bridge: &BridgeConfig, models: &[ModelChoice]) -> String 
   const enc = new TextEncoder();
   const dec = new TextDecoder();
   const orig = window.fetch.bind(window);
+  function installMetrics() {
+    if (window.__ccMetricsPoller) return;
+    window.__ccMetricsPoller = true;
+    async function tick() {
+      let data;
+      try {
+        const response = await fetch(METRICS_URL, { cache: 'no-store' });
+        if (!response.ok) return;
+        data = await response.json();
+      } catch (error) {
+        return;
+      }
+      if (!data || !data.model) return;
+      if (!data.active && !(data.finished_ago_ms >= 0 && data.finished_ago_ms < 300000)) return;
+      const bar = document.getElementById('ag-prism-pulse-bar');
+      const shadow = bar && bar.shadowRoot;
+      if (!shadow) return;
+      const tps = shadow.getElementById('tps');
+      if (tps) {
+        if (data.tok_s > 0) tps.textContent = String(Math.max(1, Math.round(data.tok_s)));
+        tps.title = 'CC Switch 本地估算（供应商未返回流式明细）';
+      }
+      const latest = shadow.getElementById('latest-rate');
+      if (latest && data.tok_s > 0) latest.textContent = data.tok_s.toFixed(1) + ' tok/s';
+      const ttft = shadow.getElementById('ttft');
+      if (ttft && data.ttft_ms > 0) ttft.textContent = data.ttft_ms + ' ms';
+      const cache = shadow.getElementById('cache-rate');
+      if (cache) cache.title = '中转供应商未返回缓存命中数据';
+    }
+    setInterval(tick, 600);
+    tick();
+  }
   function decodeFrame(bytes) {
     if (bytes.length < 5) throw new Error('short frame');
     const len = ((bytes[1] << 24) | (bytes[2] << 16) | (bytes[3] << 8) | bytes[4]) >>> 0;
@@ -349,6 +388,7 @@ fn build_bridge_script(bridge: &BridgeConfig, models: &[ModelChoice]) -> String 
       return res;
     }
   };
+  installMetrics();
 })();
 "#,
     );

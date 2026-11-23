@@ -11,13 +11,15 @@ use axum::{
     extract::{Request, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::any,
+    routing::{any, get},
     Router,
 };
+use bytes::Bytes;
+use futures::StreamExt;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 
@@ -86,10 +88,91 @@ pub struct Settings {
     pub depth: ThinkingDepth,
 }
 
+#[derive(Debug, Default)]
+struct MetricsState {
+    model: String,
+    active: bool,
+    done: bool,
+    started: Option<Instant>,
+    first: Option<Instant>,
+    ended: Option<Instant>,
+    prompt_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: Option<u64>,
+    output_chars: u64,
+}
+
+impl MetricsState {
+    fn start(&mut self, model: &str) {
+        *self = Self {
+            model: model.to_string(),
+            active: true,
+            started: Some(Instant::now()),
+            ..Self::default()
+        };
+    }
+
+    fn fail(&mut self) {
+        self.active = false;
+        self.done = true;
+        self.ended = Some(Instant::now());
+    }
+
+    fn finish(&mut self) {
+        if self.output_tokens == 0 {
+            self.output_tokens = self.output_chars / 4;
+        }
+        self.active = false;
+        self.done = true;
+        self.ended = Some(Instant::now());
+    }
+
+    fn apply_sse_line(&mut self, line: &str) {
+        let line = line.trim();
+        let Some(data) = line.strip_prefix("data:") else {
+            return;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            return;
+        };
+        if let Some(usage) = value.get("usageMetadata") {
+            if let Some(tokens) = usage.get("promptTokenCount").and_then(Value::as_u64) {
+                self.prompt_tokens = tokens;
+            }
+            if let Some(tokens) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
+                self.output_tokens = tokens;
+            }
+            if let Some(tokens) = usage.get("cachedContentTokenCount").and_then(Value::as_u64) {
+                self.cached_tokens = Some(tokens);
+            }
+        }
+        if let Some(candidates) = value.get("candidates").and_then(Value::as_array) {
+            for candidate in candidates {
+                if let Some(parts) = candidate
+                    .pointer("/content/parts")
+                    .and_then(Value::as_array)
+                {
+                    for part in parts {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            self.output_chars += text.chars().count() as u64;
+                            self.first.get_or_insert_with(Instant::now);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Shared {
     settings: Arc<RwLock<Settings>>,
     selection: Arc<RwLock<Option<Selection>>>,
+    metrics: Arc<StdMutex<MetricsState>>,
     client: reqwest::Client,
 }
 
@@ -130,10 +213,12 @@ pub async fn ensure(settings: Settings) -> Result<String, String> {
     let shared = Shared {
         settings: Arc::new(RwLock::new(settings)),
         selection: selection.clone(),
+        metrics: Arc::new(StdMutex::new(MetricsState::default())),
         client,
     };
     let app = Router::new()
         .route("/__ccswitch_select", any(select))
+        .route("/__ccswitch_metrics", get(metrics))
         .fallback(any(proxy))
         .with_state(shared.clone());
     tauri::async_runtime::spawn(async move {
@@ -206,6 +291,48 @@ async fn select(State(shared): State<Shared>, request: Request) -> Response {
     }
 }
 
+/// 页面里的 Prism 指标条通过这里读取代理侧的真实请求计时与输出 token，估算 tok/s。
+async fn metrics(State(shared): State<Shared>) -> Response {
+    let state = match shared.metrics.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let now = Instant::now();
+    let elapsed_ms = state
+        .started
+        .map(|started| now.saturating_duration_since(started).as_millis() as u64)
+        .unwrap_or(0);
+    let ttft_ms = match (state.started, state.first) {
+        (Some(started), Some(first)) => first.saturating_duration_since(started).as_millis() as u64,
+        _ => 0,
+    };
+    let generation_ms = match (state.first, state.ended.or(Some(now))) {
+        (Some(first), Some(end)) => end.saturating_duration_since(first).as_millis() as u64,
+        _ => 0,
+    };
+    let tok_s = if state.output_tokens > 0 && generation_ms > 0 {
+        state.output_tokens as f64 / (generation_ms as f64 / 1000.0)
+    } else {
+        0.0
+    };
+    let value = json!({
+        "active": state.active,
+        "done": state.done,
+        "model": state.model,
+        "tok_s": tok_s,
+        "ttft_ms": ttft_ms,
+        "output_tokens": state.output_tokens,
+        "prompt_tokens": state.prompt_tokens,
+        "cached_tokens": state.cached_tokens,
+        "elapsed_ms": elapsed_ms,
+        "finished_ago_ms": state
+            .ended
+            .map(|ended| now.saturating_duration_since(ended).as_millis() as u64)
+            .unwrap_or(0),
+    });
+    with_cors(axum::Json(value).into_response())
+}
+
 fn error_response(status: StatusCode, message: &str) -> Response {
     (status, message.to_string()).into_response()
 }
@@ -219,7 +346,7 @@ fn with_cors(mut response: Response) -> Response {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        "POST, OPTIONS".parse().unwrap(),
+        "GET, POST, OPTIONS".parse().unwrap(),
     );
     response
 }
@@ -264,6 +391,11 @@ async fn forward(shared: Shared, request: Request) -> Result<Response, String> {
         }
     }
 
+    let metrics_request = main_request
+        && !parts.uri.path().contains(":countTokens")
+        && (parts.uri.path().contains(":generateContent")
+            || parts.uri.path().contains(":streamGenerateContent"));
+
     let target = join_upstream(&settings.upstream, &path);
 
     let mut outbound_body = body.to_vec();
@@ -292,16 +424,41 @@ async fn forward(shared: Shared, request: Request) -> Result<Response, String> {
         .map_err(|error| format!("不支持的请求方法: {error}"))?;
     let headers = outbound_headers(&parts.headers, &settings.api_key)?;
 
-    let response = shared
+    if metrics_request {
+        let model = selection
+            .as_ref()
+            .map(|selection| selection.model.clone())
+            .unwrap_or_else(|| settings.model.clone());
+        if let Ok(mut state) = shared.metrics.lock() {
+            state.start(&model);
+        }
+    }
+
+    let response = match shared
         .client
         .request(method, &target)
         .headers(headers)
         .body(outbound_body)
         .send()
         .await
-        .map_err(|error| format!("请求上游失败: {error}"))?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            if metrics_request {
+                if let Ok(mut state) = shared.metrics.lock() {
+                    state.fail();
+                }
+            }
+            return Err(format!("请求上游失败: {error}"));
+        }
+    };
 
     let status = response.status();
+    if metrics_request && !status.is_success() {
+        if let Ok(mut state) = shared.metrics.lock() {
+            state.fail();
+        }
+    }
     let mut builder = Response::builder().status(status.as_u16());
     for (name, value) in response.headers() {
         if is_hop_by_hop(name.as_str())
@@ -312,8 +469,48 @@ async fn forward(shared: Shared, request: Request) -> Result<Response, String> {
         }
         builder = builder.header(name, value);
     }
+    if !metrics_request {
+        return builder
+            .body(Body::from_stream(response.bytes_stream()))
+            .map_err(|error| format!("构造响应失败: {error}"));
+    }
+
+    let metrics = shared.metrics.clone();
+    let upstream = response.bytes_stream();
+    let stream = async_stream::stream! {
+        let mut upstream = upstream;
+        let mut line_buffer: Vec<u8> = Vec::new();
+        while let Some(item) = upstream.next().await {
+            match item {
+                Ok(bytes) => {
+                    if let Ok(mut state) = metrics.lock() {
+                        state.first.get_or_insert_with(Instant::now);
+                        line_buffer.extend_from_slice(&bytes);
+                        while let Some(position) = line_buffer.iter().position(|byte| *byte == b'\n') {
+                            let line: Vec<u8> = line_buffer.drain(..=position).collect();
+                            state.apply_sse_line(&String::from_utf8_lossy(&line));
+                        }
+                        if line_buffer.len() > 1024 * 1024 {
+                            line_buffer.clear();
+                        }
+                    }
+                    yield Ok::<Bytes, reqwest::Error>(bytes);
+                }
+                Err(error) => {
+                    if let Ok(mut state) = metrics.lock() {
+                        state.fail();
+                    }
+                    yield Err(error);
+                    return;
+                }
+            }
+        }
+        if let Ok(mut state) = metrics.lock() {
+            state.finish();
+        }
+    };
     builder
-        .body(Body::from_stream(response.bytes_stream()))
+        .body(Body::from_stream(stream))
         .map_err(|error| format!("构造响应失败: {error}"))
 }
 
@@ -504,6 +701,21 @@ mod tests {
             ),
             "/v1beta/models/gemini-4-neon-lite:generateContent"
         );
+    }
+
+    #[test]
+    fn metrics_reads_sse_usage_and_text() {
+        let mut state = MetricsState::default();
+        state.apply_sse_line(r#"data: {"candidates":[{"content":{"parts":[{"text":"你好"}]}}]}"#);
+        state.apply_sse_line(
+            r#"data: {"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":8,"cachedContentTokenCount":64}}"#,
+        );
+        state.finish();
+        assert_eq!(state.output_chars, 2);
+        assert_eq!(state.prompt_tokens, 120);
+        assert_eq!(state.output_tokens, 8);
+        assert_eq!(state.cached_tokens, Some(64));
+        assert!(state.done && !state.active);
     }
 
     #[test]
