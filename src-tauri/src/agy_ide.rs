@@ -64,9 +64,44 @@ pub fn uninstall_wrapper() -> Result<AgyIdeStatus, String> {
     status()
 }
 
+/// 默认供应商记录：在 CC Switch 里成功启动过一次的卡片会成为普通启动的默认值。
+const DEFAULT_PROVIDER_FILE: &str = "agy-default-provider";
+
+pub fn default_provider_path() -> PathBuf {
+    crate::config::get_app_config_dir().join(DEFAULT_PROVIDER_FILE)
+}
+
+pub fn read_default_provider() -> Option<String> {
+    fs::read_to_string(default_provider_path())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub fn remember_default_provider(id: &str) {
+    let path = default_provider_path();
+    let tmp = path.with_extension("tmp");
+    let result = fs::write(&tmp, id.trim()).and_then(|_| fs::rename(&tmp, &path));
+    if let Err(error) = result {
+        let _ = fs::remove_file(&tmp);
+        log::warn!("记录默认 Antigravity 供应商失败: {error}");
+    }
+}
+
 /// 从 CC Switch 启动 IDE。Key 卡注入 GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL /
 /// ANTIGRAVITY_CCSWITCH_MODEL；官方卡清空这三项，走原生 Google 登录。
-pub async fn launch(provider: &Provider) -> Result<(), String> {
+///
+/// 返回启动出的 IDE 进程。GUI 会另起线程等待它退出；`agy-launch` CLI 则自己
+/// 等待，以便进程内的推理深度代理一直存活到 IDE 关闭。
+pub async fn launch(provider: &Provider) -> Result<std::process::Child, String> {
+    launch_with_args(provider, &[]).await
+}
+
+/// 与 [`launch`] 相同，但把 `extra_args` 原样传给 IDE 启动器。
+pub async fn launch_with_args(
+    provider: &Provider,
+    extra_args: &[String],
+) -> Result<std::process::Child, String> {
     let install = discover().ok_or_else(|| "未检测到 Antigravity IDE".to_string())?;
     if !install.is_wrapper_installed() {
         return Err("接管尚未启用，请先在 Antigravity 页启用接管".to_string());
@@ -92,8 +127,32 @@ pub async fn launch(provider: &Provider) -> Result<(), String> {
         .launcher
         .clone()
         .ok_or_else(|| "找不到 Antigravity 启动器".to_string())?;
-    let mut command = Command::new(&launcher);
-    for (key, value) in &plan.env {
+
+    log::info!("Antigravity IDE: 从供应商卡片启动，模型 {:?}", plan.model);
+    spawn_ide(&launcher, &plan.env, extra_args)
+}
+
+/// 不注入任何 CC Switch 配置，按原生方式启动 IDE。
+///
+/// 这是 `agy-launch` 的回退路径：没有可用卡片、接管未启用、数据库读不了，
+/// 或者 IDE 已经开着（交给 Electron 单实例去聚焦现有窗口）时使用。
+pub fn launch_native(extra_args: &[String]) -> Result<std::process::Child, String> {
+    let install = discover().ok_or_else(|| "未检测到 Antigravity IDE".to_string())?;
+    let launcher = install
+        .launcher
+        .clone()
+        .ok_or_else(|| "找不到 Antigravity 启动器".to_string())?;
+    log::info!("Antigravity IDE: 原生方式启动");
+    spawn_ide(&launcher, &clear_env(), extra_args)
+}
+
+fn spawn_ide(
+    launcher: &Path,
+    env: &[(&'static str, Option<String>)],
+    extra_args: &[String],
+) -> Result<std::process::Child, String> {
+    let mut command = Command::new(launcher);
+    for (key, value) in env {
         match value {
             Some(value) => {
                 command.env(key, value);
@@ -103,23 +162,20 @@ pub async fn launch(provider: &Provider) -> Result<(), String> {
             }
         }
     }
+    // 启动器脚本用这个变量避免再次转进 agy-launch，形成递归。
+    command.env("ANTIGRAVITY_CCSWITCH_BYPASS", "1");
+    for arg in extra_args {
+        command.arg(arg);
+    }
     command
         .current_dir(crate::config::get_home_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     detach(&mut command);
-
-    log::info!("Antigravity IDE: 从供应商卡片启动，模型 {:?}", plan.model);
-    let mut child = command
+    command
         .spawn()
-        .map_err(|error| format!("启动 Antigravity IDE 失败: {error}"))?;
-    std::thread::spawn(move || {
-        if let Err(error) = child.wait() {
-            log::warn!("等待 Antigravity IDE 退出失败: {error}");
-        }
-    });
-    Ok(())
+        .map_err(|error| format!("启动 Antigravity IDE 失败: {error}"))
 }
 
 struct LaunchPlan {

@@ -2,6 +2,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // 无界面子命令：普通启动器会调用 `cc-switch agy-launch`，此时不初始化
+    // Tauri/WebKit，也不进 single-instance，读完供应商卡片直接拉起 IDE。
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    if args.first().map(String::as_str) == Some("agy-launch") {
+        std::process::exit(cc_switch_lib::run_agy_launch_cli(&args[1..]));
+    }
+
     // 在 Linux 上设置 WebKit 环境变量以解决 DMA-BUF 渲染问题
     // 某些 Linux 系统（如 Debian 13.2、Nvidia GPU）上 WebKitGTK 的 DMA-BUF 渲染器可能导致白屏/黑屏
     // 参考: https://github.com/tauri-apps/tauri/issues/9394

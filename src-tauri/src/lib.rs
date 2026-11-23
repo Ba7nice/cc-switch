@@ -1,5 +1,6 @@
 mod agy_config;
 mod agy_ide;
+mod agy_launch_cli;
 mod agy_reasoning;
 #[cfg(all(test, unix))]
 mod agy_smoke_tests;
@@ -463,6 +464,11 @@ fn handle_second_instance(app: &tauri::AppHandle, args: Vec<String>) {
     if let Some(window) = app.get_webview_window("main") {
         tray::reveal_main_window(&window, "single-instance");
     }
+}
+
+/// cc-switch agy-launch 的无界面入口：不初始化 Tauri/WebKit，直接读卡并拉起 IDE。
+pub fn run_agy_launch_cli(args: &[String]) -> i32 {
+    agy_launch_cli::run(args)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
