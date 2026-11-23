@@ -12,6 +12,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::SystemTime;
 
 const MARKER: &str = "CC Switch Antigravity IDE";
 const REAL_NAME: &str = "language_server.real";
@@ -102,6 +103,7 @@ pub async fn launch_with_args(
     provider: &Provider,
     extra_args: &[String],
 ) -> Result<std::process::Child, String> {
+    let started_at = SystemTime::now();
     let install = discover().ok_or_else(|| "未检测到 Antigravity IDE".to_string())?;
     if !install.is_wrapper_installed() {
         return Err("接管尚未启用，请先在 Antigravity 页启用接管".to_string());
@@ -129,7 +131,9 @@ pub async fn launch_with_args(
         .ok_or_else(|| "找不到 Antigravity 启动器".to_string())?;
 
     log::info!("Antigravity IDE: 从供应商卡片启动，模型 {:?}", plan.model);
-    spawn_ide(&launcher, &plan.env, extra_args)
+    let child = spawn_ide(&launcher, &plan.env, extra_args)?;
+    crate::agy_plugins_boot::watch(started_at);
+    Ok(child)
 }
 
 /// 不注入任何 CC Switch 配置，按原生方式启动 IDE。

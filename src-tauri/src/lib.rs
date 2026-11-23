@@ -1,6 +1,7 @@
 mod agy_config;
 mod agy_ide;
 mod agy_launch_cli;
+mod agy_plugins_boot;
 mod agy_reasoning;
 #[cfg(all(test, unix))]
 mod agy_smoke_tests;
