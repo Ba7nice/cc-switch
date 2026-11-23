@@ -249,6 +249,13 @@
     "geminiConfigHint": "使用 .env 格式配置 Gemini",
     "form": {
       "agy": {
+        "thinking": "推理深度",
+        "thinkingHelp": "只对第三方 Gemini 端点生效：CC Switch 启动 Antigravity IDE 时会跑一个本地代理，只改写所选模型请求里的 thinkingConfig.thinkingBudget。",
+        "thinkingAuto": "自动（不干预）",
+        "thinkingLow": "低（2048 tokens）",
+        "thinkingMedium": "中（8192 tokens）",
+        "thinkingHigh": "高（24576 tokens）",
+        "thinkingHint": "选择低/中/高后，CC Switch 启动 IDE 时会开启本地代理。请保持 CC Switch 运行，改动后重启 IDE 生效。",
         "endpointHelp": "留空用 Google 默认 API。第三方地址须兼容 Gemini API，并支持 agy 内置的 Gemini 模型。",
         "modelHelp": "填模型列表里的显示名称，可点「获取模型列表」选择。只对那次会话生效。",
         "keyFieldsHint": "模型、Key 和地址都只在「打开终端」时使用，不写进 Antigravity 自己的设置。",

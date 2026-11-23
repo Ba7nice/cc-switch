@@ -66,7 +66,7 @@ pub fn uninstall_wrapper() -> Result<AgyIdeStatus, String> {
 
 /// 从 CC Switch 启动 IDE。Key 卡注入 GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL /
 /// ANTIGRAVITY_CCSWITCH_MODEL；官方卡清空这三项，走原生 Google 登录。
-pub fn launch(provider: &Provider) -> Result<(), String> {
+pub async fn launch(provider: &Provider) -> Result<(), String> {
     let install = discover().ok_or_else(|| "未检测到 Antigravity IDE".to_string())?;
     if !install.is_wrapper_installed() {
         return Err("接管尚未启用，请先在 Antigravity 页启用接管".to_string());
@@ -78,7 +78,15 @@ pub fn launch(provider: &Provider) -> Result<(), String> {
     let official = crate::services::provider::agy_direct::is_official(provider);
     let settings = crate::services::provider::agy_direct::live_settings(provider)
         .map_err(|error| error.to_string())?;
-    let plan = plan_launch(&settings, official)?;
+    let mut plan = plan_launch(&settings, official)?;
+    if let Some(reasoning) = plan.reasoning.take() {
+        let proxy = crate::agy_reasoning::ensure(reasoning).await?;
+        for (key, value) in &mut plan.env {
+            if *key == "GOOGLE_GEMINI_BASE_URL" {
+                *value = Some(proxy.clone());
+            }
+        }
+    }
 
     let launcher = install
         .launcher
@@ -117,6 +125,7 @@ pub fn launch(provider: &Provider) -> Result<(), String> {
 struct LaunchPlan {
     env: Vec<(&'static str, Option<String>)>,
     model: Option<String>,
+    reasoning: Option<crate::agy_reasoning::Settings>,
 }
 
 fn plan_launch(settings: &Value, official: bool) -> Result<LaunchPlan, String> {
@@ -124,6 +133,7 @@ fn plan_launch(settings: &Value, official: bool) -> Result<LaunchPlan, String> {
         return Ok(LaunchPlan {
             env: clear_env(),
             model: None,
+            reasoning: None,
         });
     }
 
@@ -137,6 +147,14 @@ fn plan_launch(settings: &Value, official: bool) -> Result<LaunchPlan, String> {
     let model = projection
         .model
         .ok_or_else(|| "这张卡片没有模型名（config.model.name 或 GEMINI_MODEL）".to_string())?;
+    // 只有显式选择了低/中/高才起代理；auto 保持原来的直连行为。
+    let reasoning =
+        crate::agy_reasoning::depth_of(settings).map(|depth| crate::agy_reasoning::Settings {
+            upstream: base_url.clone(),
+            api_key: api_key.clone(),
+            model: model.clone(),
+            depth,
+        });
     Ok(LaunchPlan {
         env: vec![
             ("GEMINI_API_KEY", Some(api_key)),
@@ -145,6 +163,7 @@ fn plan_launch(settings: &Value, official: bool) -> Result<LaunchPlan, String> {
             ("GOOGLE_API_KEY", None),
         ],
         model: Some(model),
+        reasoning,
     })
 }
 

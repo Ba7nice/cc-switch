@@ -27,5 +27,5 @@ pub async fn agy_ide_launch(state: State<'_, AppState>, provider_id: String) -> 
         .get_provider_by_id(&provider_id, &AppType::Agy)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
-    agy_ide::launch(&provider)
+    agy_ide::launch(&provider).await
 }

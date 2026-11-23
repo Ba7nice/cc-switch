@@ -1,5 +1,6 @@
 mod agy_config;
 mod agy_ide;
+mod agy_reasoning;
 #[cfg(all(test, unix))]
 mod agy_smoke_tests;
 mod app_config;

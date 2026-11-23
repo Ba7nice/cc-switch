@@ -51,10 +51,10 @@ fn catalog_model_ids(models: Option<serde_json::Value>) -> Vec<String> {
                 .iter()
                 .find_map(|k| m.get(k)?.as_str().filter(|s| !s.is_empty()))
                 .or_else(|| {
-                    m.get("name")?
-                        .as_str()?
-                        .strip_prefix("models/")
-                        .filter(|s| !s.is_empty())
+                    let name = m.get("name")?.as_str()?;
+                    // Gemini 原生端点返回 "models/<id>"，部分第三方兼容端点只返回裸 id。
+                    let id = name.strip_prefix("models/").unwrap_or(name);
+                    (!id.is_empty() && !id.chars().any(char::is_whitespace)).then_some(id)
                 })
         })
         .map(str::to_string)
@@ -757,19 +757,33 @@ mod tests {
     }
 
     #[test]
+    fn agy_google_model_catalog_accepts_bare_names() {
+        let models = catalog_model_ids(Some(serde_json::json!([
+            {"name":"gemini-2.5-flash"}, {"name":"models/gemini-test"},
+            {"name":"Display name"}, {"name":""}
+        ])));
+        assert_eq!(models, ["gemini-2.5-flash", "gemini-test"]);
+    }
+
+    #[test]
     fn test_catalog_model_ids_slug_then_id() {
-        // `models` 条目解析：slug 优先，回退 id，两者皆缺时跳过。
+        // `models` 条目解析：slug 优先，回退 id，再回退 name（裸 id 也接受）。
         let json = r#"{"models": [
             {"slug": "glm-4.7"},
             {"id": "openai-shaped"},
-            {"name": "neither-slug-nor-id"},
+            {"name": "bare-gemini-id"},
+            {"name": "Display name"},
             {}
         ]}"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let ids = catalog_model_ids(resp.models);
         assert_eq!(
             ids,
-            vec!["glm-4.7".to_string(), "openai-shaped".to_string()]
+            vec![
+                "glm-4.7".to_string(),
+                "openai-shaped".to_string(),
+                "bare-gemini-id".to_string()
+            ]
         );
     }
 

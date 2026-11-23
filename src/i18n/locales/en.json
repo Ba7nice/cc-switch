@@ -249,6 +249,13 @@
     "geminiConfigHint": "Use .env format to configure Gemini",
     "form": {
       "agy": {
+        "thinking": "Reasoning depth",
+        "thinkingHelp": "Only for third-party Gemini endpoints. When launching Antigravity IDE, CC Switch runs a local proxy that rewrites thinkingConfig.thinkingBudget for requests to the selected model.",
+        "thinkingAuto": "Auto (leave untouched)",
+        "thinkingLow": "Low (2048 tokens)",
+        "thinkingMedium": "Medium (8192 tokens)",
+        "thinkingHigh": "High (24576 tokens)",
+        "thinkingHint": "With Low/Medium/High selected, CC Switch starts a local proxy when launching the IDE. Keep CC Switch running and restart the IDE after changing this setting.",
         "endpointHelp": "Leave empty for Google's default API. Third-party endpoints must support the Gemini API and agy's built-in Gemini models.",
         "modelHelp": "Use the display name from the model list (Fetch Models). Applies to that session only.",
         "keyFieldsHint": "The model, key and endpoint are only used by \"Open Terminal\" and are never written to Antigravity's own settings.",

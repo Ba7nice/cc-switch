@@ -4,6 +4,13 @@ import { FormLabel } from "@/components/ui/form";
 import { Download, Info, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { HelpTip } from "@/components/ui/help-tip";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "@/lib/toast";
 import EndpointSpeedTest from "./EndpointSpeedTest";
 import { ApiKeySection, EndpointField, ModelInputWithFetch } from "./shared";
@@ -47,6 +54,10 @@ interface GeminiFormFieldsProps {
   model: string;
   onModelChange: (value: string) => void;
 
+  // Antigravity reasoning depth（空字符串表示用 IDE 默认值）
+  thinking: string;
+  onThinkingChange: (value: string) => void;
+
   // Speed Test Endpoints
   speedTestEndpoints: EndpointCandidate[];
 }
@@ -73,6 +84,8 @@ export function GeminiFormFields({
   shouldShowModelField,
   model,
   onModelChange,
+  thinking,
+  onThinkingChange,
   speedTestEndpoints,
 }: GeminiFormFieldsProps) {
   const { t } = useTranslation();
@@ -80,11 +93,17 @@ export function GeminiFormFields({
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
+  // 检测是否为 Google 官方（使用 OAuth）
+  const isGoogleOfficial =
+    partnerPromotionKey?.toLowerCase() === "google-official";
+
   const handleFetchModels = useCallback(() => {
-    // agy 两种模式都只认它自己清单里的显示名，接口的模型 ID 对不上，所以一律问本机 agy。
+    // 官方 Antigravity 卡只认本机 agy 清单里的显示名，接口模型 ID 对不上；
+    // 第三方卡直接把供应商的 Gemini 原生 /v1beta/models 列表拿过来即可。
     const agy = appId === "agy";
+    const agyOfficial = agy && isGoogleOfficial;
     const modelBaseUrl = baseUrl.trim();
-    if (!agy && (!modelBaseUrl || !apiKey)) {
+    if (!agyOfficial && (!modelBaseUrl || !apiKey)) {
       showFetchModelsError(null, t, {
         hasApiKey: !!apiKey,
         hasBaseUrl: !!modelBaseUrl,
@@ -92,10 +111,10 @@ export function GeminiFormFields({
       return;
     }
     setIsFetchingModels(true);
-    (agy
+    (agyOfficial
       ? getAgyModels({ apiKey, baseUrl: modelBaseUrl })
-      : // Gemini CLI 只说 Gemini 原生协议（v1beta + x-goog-api-key），能被它用的
-        // 网关也必然认这一套；按默认的 Bearer + /v1/models 取，官方 401、网关回 0 条（#8546）。
+      : // Gemini CLI 与 Antigravity 都只说 Gemini 原生协议（v1beta + x-goog-api-key），
+        // 能被它们用的网关也必然认这一套；按默认的 Bearer + /v1/models 取会 401 或回 0 条。
         fetchModelsForConfig(
           modelBaseUrl,
           apiKey,
@@ -122,11 +141,7 @@ export function GeminiFormFields({
         showFetchModelsError(err, t);
       })
       .finally(() => setIsFetchingModels(false));
-  }, [appId, baseUrl, apiKey, t]);
-
-  // 检测是否为 Google 官方（使用 OAuth）
-  const isGoogleOfficial =
-    partnerPromotionKey?.toLowerCase() === "google-official";
+  }, [appId, baseUrl, apiKey, isGoogleOfficial, t]);
 
   return (
     <>
@@ -230,6 +245,65 @@ export function GeminiFormFields({
             fetchedModels={fetchedModels}
             isLoading={isFetchingModels}
           />
+        </div>
+      )}
+
+      {/* Antigravity 推理深度：由 CC Switch 启动 IDE 时的本地代理改写 thinkingConfig */}
+      {appId === "agy" && !isGoogleOfficial && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-0.5">
+            <FormLabel htmlFor="agy-thinking">
+              {t("provider.form.agy.thinking", {
+                defaultValue: "推理深度",
+              })}
+            </FormLabel>
+            <HelpTip
+              title={t("provider.form.agy.thinking", {
+                defaultValue: "推理深度",
+              })}
+            >
+              {t("provider.form.agy.thinkingHelp")}
+            </HelpTip>
+          </div>
+          <Select
+            value={thinking || "auto"}
+            onValueChange={(next) => {
+              if (!next) return;
+              onThinkingChange(next === "auto" ? "" : next);
+            }}
+          >
+            <SelectTrigger id="agy-thinking" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">
+                {t("provider.form.agy.thinkingAuto", {
+                  defaultValue: "自动（不干预）",
+                })}
+              </SelectItem>
+              <SelectItem value="low">
+                {t("provider.form.agy.thinkingLow", {
+                  defaultValue: "低（2048 tokens）",
+                })}
+              </SelectItem>
+              <SelectItem value="medium">
+                {t("provider.form.agy.thinkingMedium", {
+                  defaultValue: "中（8192 tokens）",
+                })}
+              </SelectItem>
+              <SelectItem value="high">
+                {t("provider.form.agy.thinkingHigh", {
+                  defaultValue: "高（24576 tokens）",
+                })}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-caption text-fg-2">
+            {t("provider.form.agy.thinkingHint", {
+              defaultValue:
+                "选择低/中/高后，CC Switch 会在启动 IDE 时开启本地代理。请保持 CC Switch 运行，改动后重启 IDE 生效。",
+            })}
+          </p>
         </div>
       )}
 

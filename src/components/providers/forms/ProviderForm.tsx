@@ -1115,11 +1115,13 @@ function ProviderFormFull({
     geminiApiKey,
     geminiBaseUrl,
     geminiModel,
+    geminiThinking,
     envError,
     configError: geminiConfigError,
     handleGeminiApiKeyChange: originalHandleGeminiApiKeyChange,
     handleGeminiBaseUrlChange: originalHandleGeminiBaseUrlChange,
     handleGeminiModelChange: originalHandleGeminiModelChange,
+    handleGeminiThinkingChange: originalHandleGeminiThinkingChange,
     handleGeminiEnvChange,
     handleGeminiConfigChange,
     resetGeminiConfig,
@@ -1157,7 +1159,11 @@ function ProviderFormFull({
 
   const updateGeminiEnvField = useCallback(
     (
-      key: "GEMINI_API_KEY" | "GOOGLE_GEMINI_BASE_URL" | "GEMINI_MODEL",
+      key:
+        | "GEMINI_API_KEY"
+        | "GOOGLE_GEMINI_BASE_URL"
+        | "GEMINI_MODEL"
+        | "ANTIGRAVITY_CCSWITCH_THINKING",
       value: string,
     ) => {
       try {
@@ -1167,7 +1173,11 @@ function ProviderFormFull({
         if (!config.env || typeof config.env !== "object") {
           config.env = {};
         }
-        config.env[key] = value;
+        if (key === "ANTIGRAVITY_CCSWITCH_THINKING" && !value) {
+          delete config.env[key];
+        } else {
+          config.env[key] = value;
+        }
         handleSettingsConfigChange(JSON.stringify(config, null, 2));
       } catch {}
     },
@@ -1199,6 +1209,17 @@ function ProviderFormFull({
       updateGeminiEnvField("GEMINI_MODEL", model.trim());
     },
     [originalHandleGeminiModelChange, updateGeminiEnvField],
+  );
+
+  const handleGeminiThinkingChange = useCallback(
+    (thinking: string) => {
+      originalHandleGeminiThinkingChange(thinking);
+      updateGeminiEnvField(
+        "ANTIGRAVITY_CCSWITCH_THINKING",
+        thinking.trim(),
+      );
+    },
+    [originalHandleGeminiThinkingChange, updateGeminiEnvField],
   );
 
   // ── Extracted hooks: OpenCode / OMO / OpenClaw ─────────────────────
@@ -3005,6 +3026,8 @@ function ProviderFormFull({
               shouldShowModelField={true}
               model={geminiModel}
               onModelChange={handleGeminiModelChange}
+              thinking={geminiThinking}
+              onThinkingChange={handleGeminiThinkingChange}
               speedTestEndpoints={speedTestEndpoints}
             />
           )}

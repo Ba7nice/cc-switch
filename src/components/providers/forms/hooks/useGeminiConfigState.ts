@@ -20,6 +20,7 @@ export function useGeminiConfigState({
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [geminiBaseUrl, setGeminiBaseUrl] = useState("");
   const [geminiModel, setGeminiModel] = useState("");
+  const [geminiThinking, setGeminiThinking] = useState("");
   const [envError, setEnvError] = useState("");
   const [configError, setConfigError] = useState("");
 
@@ -31,6 +32,7 @@ export function useGeminiConfigState({
         "GOOGLE_GEMINI_BASE_URL",
         "GEMINI_API_KEY",
         "GEMINI_MODEL",
+        "ANTIGRAVITY_CCSWITCH_THINKING",
       ];
       const lines: string[] = [];
       const addedKeys = new Set<string>();
@@ -99,6 +101,9 @@ export function useGeminiConfigState({
       if (typeof env.GEMINI_MODEL === "string") {
         setGeminiModel(env.GEMINI_MODEL);
       }
+      if (typeof env.ANTIGRAVITY_CCSWITCH_THINKING === "string") {
+        setGeminiThinking(env.ANTIGRAVITY_CCSWITCH_THINKING);
+      }
     }
   }, [initialData, envObjToString]);
 
@@ -108,6 +113,7 @@ export function useGeminiConfigState({
     const extractedKey = envObj.GEMINI_API_KEY || "";
     const extractedBaseUrl = envObj.GOOGLE_GEMINI_BASE_URL || "";
     let extractedModel = envObj.GEMINI_MODEL || "";
+    const extractedThinking = envObj.ANTIGRAVITY_CCSWITCH_THINKING || "";
     if (preferConfigModel) {
       try {
         const config = JSON.parse(geminiConfig || "{}");
@@ -129,6 +135,9 @@ export function useGeminiConfigState({
     if (extractedModel !== geminiModel) {
       setGeminiModel(extractedModel);
     }
+    if (extractedThinking !== geminiThinking) {
+      setGeminiThinking(extractedThinking);
+    }
   }, [
     geminiEnv,
     geminiConfig,
@@ -137,6 +146,7 @@ export function useGeminiConfigState({
     geminiApiKey,
     geminiBaseUrl,
     geminiModel,
+    geminiThinking,
   ]);
 
   // 验证 Gemini Config JSON
@@ -230,6 +240,23 @@ export function useGeminiConfigState({
     ],
   );
 
+  // 处理 Antigravity 推理深度（空字符串表示用 IDE 自己的默认值）
+  const handleGeminiThinkingChange = useCallback(
+    (thinking: string) => {
+      const trimmed = thinking.trim();
+      setGeminiThinking(trimmed);
+
+      const envObj = envStringToObj(geminiEnv);
+      if (trimmed) {
+        envObj.ANTIGRAVITY_CCSWITCH_THINKING = trimmed;
+      } else {
+        delete envObj.ANTIGRAVITY_CCSWITCH_THINKING;
+      }
+      setGeminiEnv(envObjToString(envObj));
+    },
+    [geminiEnv, envStringToObj, envObjToString, setGeminiEnv],
+  );
+
   // 处理 env 变化
   const handleGeminiEnvChange = useCallback(
     (value: string) => {
@@ -273,6 +300,12 @@ export function useGeminiConfigState({
       } else {
         setGeminiModel("");
       }
+
+      if (typeof env.ANTIGRAVITY_CCSWITCH_THINKING === "string") {
+        setGeminiThinking(env.ANTIGRAVITY_CCSWITCH_THINKING);
+      } else {
+        setGeminiThinking("");
+      }
     },
     [envObjToString, setGeminiEnv, setGeminiConfig],
   );
@@ -283,6 +316,7 @@ export function useGeminiConfigState({
     geminiApiKey,
     geminiBaseUrl,
     geminiModel,
+    geminiThinking,
     envError,
     configError,
     setGeminiEnv,
@@ -290,6 +324,7 @@ export function useGeminiConfigState({
     handleGeminiApiKeyChange,
     handleGeminiBaseUrlChange,
     handleGeminiModelChange,
+    handleGeminiThinkingChange,
     handleGeminiEnvChange,
     handleGeminiConfigChange,
     resetGeminiConfig,

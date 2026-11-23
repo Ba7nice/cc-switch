@@ -249,6 +249,13 @@
     "geminiConfigHint": ".env 形式で Gemini を設定してください",
     "form": {
       "agy": {
+        "thinking": "推論の深さ",
+        "thinkingHelp": "サードパーティの Gemini エンドポイント専用です。Antigravity IDE の起動時に CC Switch がローカルプロキシを立て、選択したモデルへのリクエストの thinkingConfig.thinkingBudget だけを書き換えます。",
+        "thinkingAuto": "自動（変更しない）",
+        "thinkingLow": "低（2048 tokens）",
+        "thinkingMedium": "中（8192 tokens）",
+        "thinkingHigh": "高（24576 tokens）",
+        "thinkingHint": "低/中/高を選ぶと、IDE 起動時に CC Switch がローカルプロキシを開始します。CC Switch を起動したままにし、変更後は IDE を再起動してください。",
         "endpointHelp": "空欄なら Google の標準 API を使います。外部接続先は Gemini API と agy 内蔵の Gemini モデルに対応している必要があります。",
         "modelHelp": "モデル一覧の表示名を入力してください（「モデル一覧を取得」から選べます）。そのセッションにのみ適用されます。",
         "keyFieldsHint": "モデル、キー、エンドポイントは「ターミナルを開く」でのみ使われ、Antigravity 自身の設定には書き込みません。",

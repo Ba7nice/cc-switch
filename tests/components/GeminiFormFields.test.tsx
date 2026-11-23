@@ -34,6 +34,8 @@ function Harness(props: Partial<ComponentProps<typeof GeminiFormFields>>) {
         shouldShowModelField
         model=""
         onModelChange={vi.fn()}
+        thinking=""
+        onThinkingChange={vi.fn()}
         speedTestEndpoints={[]}
         {...props}
       />
@@ -50,9 +52,9 @@ describe("Antigravity model discovery", () => {
     api.getAgyModels.mockResolvedValue([{ id: "Gemini 3.8 Flash (Low)" }]);
   });
 
-  // agy 的 API Key 模式只认它内置清单里的显示名，Gemini 接口的模型 ID 用不了
-  it("asks agy's API-key mode instead of the Gemini models API", async () => {
-    render(<Harness />);
+  // 官方 Antigravity 卡只认它内置清单里的显示名，Gemini 接口的模型 ID 用不了
+  it("asks agy's native list for the official card", async () => {
+    render(<Harness partnerPromotionKey="google-official" />);
     fireEvent.click(
       screen.getByRole("button", { name: "providerForm.fetchModels" }),
     );
@@ -66,21 +68,26 @@ describe("Antigravity model discovery", () => {
     expect(api.showFetchModelsError).not.toHaveBeenCalled();
   });
 
-  it("passes a custom Gemini endpoint to agy", async () => {
+  it("fetches third-party agy models from the endpoint", async () => {
     render(<Harness baseUrl="https://relay.example/gemini" />);
     fireEvent.click(
       screen.getByRole("button", { name: "providerForm.fetchModels" }),
     );
     await waitFor(() =>
-      expect(api.getAgyModels).toHaveBeenCalledWith({
-        apiKey: "fixture-key",
-        baseUrl: "https://relay.example/gemini",
-      }),
+      expect(api.fetchModelsForConfig).toHaveBeenCalledWith(
+        "https://relay.example/gemini",
+        "fixture-key",
+        false,
+        undefined,
+        undefined,
+        { apiFormat: "google-generative-ai" },
+      ),
     );
+    expect(api.getAgyModels).not.toHaveBeenCalled();
   });
 
   it("uses native discovery for official login without a key", async () => {
-    render(<Harness apiKey="" />);
+    render(<Harness apiKey="" partnerPromotionKey="google-official" />);
     fireEvent.click(
       screen.getByRole("button", { name: "providerForm.fetchModels" }),
     );
@@ -89,7 +96,13 @@ describe("Antigravity model discovery", () => {
   });
   it("selects the native preference name rather than a CLI alias", async () => {
     const onModelChange = vi.fn();
-    render(<Harness apiKey="" onModelChange={onModelChange} />);
+    render(
+      <Harness
+        apiKey=""
+        partnerPromotionKey="google-official"
+        onModelChange={onModelChange}
+      />,
+    );
     fireEvent.click(
       screen.getByRole("button", { name: "providerForm.fetchModels" }),
     );
