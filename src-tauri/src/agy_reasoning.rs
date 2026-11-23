@@ -306,12 +306,16 @@ async fn metrics(State(shared): State<Shared>) -> Response {
         (Some(started), Some(first)) => first.saturating_duration_since(started).as_millis() as u64,
         _ => 0,
     };
-    let generation_ms = match (state.first, state.ended.or(Some(now))) {
-        (Some(first), Some(end)) => end.saturating_duration_since(first).as_millis() as u64,
-        _ => 0,
+    let effective_ms = match state.started {
+        Some(started) => state
+            .ended
+            .unwrap_or(now)
+            .saturating_duration_since(started)
+            .as_millis() as u64,
+        None => 0,
     };
-    let tok_s = if state.output_tokens > 0 && generation_ms > 0 {
-        state.output_tokens as f64 / (generation_ms as f64 / 1000.0)
+    let tok_s = if state.output_tokens > 0 && effective_ms > 0 {
+        state.output_tokens as f64 / (effective_ms as f64 / 1000.0)
     } else {
         0.0
     };

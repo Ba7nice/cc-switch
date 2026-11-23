@@ -301,15 +301,34 @@ fn build_bridge_script(bridge: &BridgeConfig, models: &[ModelChoice]) -> String 
       if (!shadow) return;
       const tps = shadow.getElementById('tps');
       if (tps) {
-        if (data.tok_s > 0) tps.textContent = String(Math.max(1, Math.round(data.tok_s)));
-        tps.title = 'CC Switch 本地估算（供应商未返回流式明细）';
+        tps.title = '有效吞吐：输出 token / 请求总耗时（含首字等待）';
+        if (data.tok_s > 0) {
+          tps.textContent = data.tok_s < 10 ? data.tok_s.toFixed(1) : String(Math.round(data.tok_s));
+        }
       }
       const latest = shadow.getElementById('latest-rate');
-      if (latest && data.tok_s > 0) latest.textContent = data.tok_s.toFixed(1) + ' tok/s';
+      if (latest) {
+        latest.title = '有效吞吐：输出 token / 请求总耗时（含首字等待）';
+        if (data.tok_s > 0) latest.textContent = data.tok_s.toFixed(1) + ' tok/s';
+      }
       const ttft = shadow.getElementById('ttft');
       if (ttft && data.ttft_ms > 0) ttft.textContent = data.ttft_ms + ' ms';
       const cache = shadow.getElementById('cache-rate');
-      if (cache) cache.title = '中转供应商未返回缓存命中数据';
+      if (cache) {
+        const promptTokens = Number(data.prompt_tokens || 0);
+        const cachedTokens = data.cached_tokens;
+        if (cachedTokens !== null && cachedTokens !== undefined && promptTokens > 0) {
+          const pct = (Number(cachedTokens) / promptTokens) * 100;
+          cache.textContent = pct.toFixed(1) + '%';
+          cache.title =
+            '本轮上游缓存命中：' + Number(cachedTokens).toLocaleString() +
+            ' / ' + promptTokens.toLocaleString() +
+            ' tok（cachedContentTokenCount / promptTokenCount）';
+        } else {
+          cache.textContent = '—';
+          cache.title = '本轮供应商未返回缓存命中数据';
+        }
+      }
     }
     setInterval(tick, 600);
     tick();
