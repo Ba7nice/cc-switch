@@ -9,6 +9,7 @@ import {
   ListPlus,
   Loader2,
   Minus,
+  Monitor,
   MoreHorizontal,
   Pencil,
   Play,
@@ -73,6 +74,8 @@ interface ProviderCardActionsProps {
   onTest?: () => void;
   isTesting?: boolean;
   onConfigureUsage?: () => void;
+  /** 用这张卡启动 Antigravity IDE（目前只有 Agy 卡提供） */
+  onLaunchIde?: () => void;
   onOpenTerminal?: () => void;
   /** 这张卡打开的终端是否与 CC Switch 的切换隔离（见 terminalIsIsolated），决定提示里带不带「环境隔离」 */
   openTerminalIsolated?: boolean;
@@ -95,6 +98,7 @@ export function ProviderCardActions({
   onTest,
   isTesting,
   onConfigureUsage,
+  onLaunchIde,
   onOpenTerminal,
   openTerminalIsolated,
   openTerminalDisabledReason,
@@ -227,7 +231,13 @@ export function ProviderCardActions({
               {t("provider.configureUsage")}
             </DropdownMenuItem>
           )}
-          {(onDuplicate || onTest || onConfigureUsage) && (
+          {onLaunchIde && (
+            <DropdownMenuItem onSelect={onLaunchIde}>
+              <Monitor className="h-3.5 w-3.5" strokeWidth={1.5} />
+              {t("provider.launchInIde")}
+            </DropdownMenuItem>
+          )}
+          {(onDuplicate || onTest || onConfigureUsage || onLaunchIde) && (
             <DropdownMenuSeparator />
           )}
           <DropdownMenuItem

@@ -95,6 +95,10 @@ import { APP_DISPLAY_NAME, AppGlyph } from "@/components/shell/AppGlyph";
 import { ProfileSwitcher } from "@/components/profiles/ProfileSwitcher";
 import { ProviderList } from "@/components/providers/ProviderList";
 import {
+  AgyIdePanel,
+  AGY_IDE_STATUS_KEY,
+} from "@/components/providers/AgyIdePanel";
+import {
   hasOpencodeDefinition,
   isNativeOpencodeConfig,
 } from "@/components/providers/forms/helpers/opencodeFormUtils";
@@ -1104,6 +1108,18 @@ function App() {
     }
   };
 
+  const handleLaunchAgyIde = async (provider: Provider) => {
+    try {
+      await providersApi.launchAgyIde(provider.id);
+      toast.success(t("agyIde.launchSuccess", { name: provider.name }));
+      await queryClient.invalidateQueries({ queryKey: AGY_IDE_STATUS_KEY });
+    } catch (error) {
+      toast.error(t("agyIde.launchFailed"), {
+        description: extractErrorMessage(error) || undefined,
+      });
+    }
+  };
+
   const handleEditProvider = async ({
     provider,
     originalId,
@@ -1658,6 +1674,7 @@ function App() {
       activeApp === "copilot"
         ? setTerminalProvider
         : undefined,
+    onLaunchIde: activeApp === "agy" ? handleLaunchAgyIde : undefined,
     onCreate: () => openAddProvider(currentModeView),
     searchOpen: providerSearchOpen,
     onSearchOpenChange: setProviderSearchOpen,
@@ -1798,6 +1815,7 @@ function App() {
       <>
         {renderAppPageHeader()}
         {renderAppSegments()}
+        {activeApp === "agy" && currentView === "providers" && <AgyIdePanel />}
         {isOpenClawView && openclawHealthWarnings.length > 0 && (
           <OpenClawHealthBanner warnings={openclawHealthWarnings} />
         )}

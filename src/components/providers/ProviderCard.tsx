@@ -91,6 +91,8 @@ interface ProviderCardProps {
   onDuplicate?: (provider: Provider) => void;
   onTest?: (provider: Provider) => void;
   onOpenTerminal?: (provider: Provider) => void;
+  /** 用这张卡的配置启动 Antigravity IDE */
+  onLaunchIde?: (provider: Provider) => void;
   isTesting?: boolean;
   dragHandleProps?: DragHandleProps;
 }
@@ -232,6 +234,7 @@ export function ProviderCard({
   onDuplicate,
   onTest,
   onOpenTerminal,
+  onLaunchIde,
   isTesting,
   dragHandleProps,
 }: ProviderCardProps) {
@@ -885,6 +888,7 @@ export function ProviderCard({
                 ? () => onOpenTerminal(provider)
                 : undefined
             }
+            onLaunchIde={onLaunchIde ? () => onLaunchIde(provider) : undefined}
             openTerminalIsolated={terminalIsIsolated(provider, appId)}
             openTerminalDisabledReason={
               terminalNeedsRoute(provider, appId)

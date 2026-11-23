@@ -1,4 +1,5 @@
 mod agy_account;
+mod agy_ide;
 mod auth;
 mod balance;
 mod claude_account;
@@ -49,6 +50,7 @@ mod provider_concurrency_tests;
 mod startup_tests;
 
 pub use agy_account::*;
+pub use agy_ide::*;
 pub use auth::*;
 pub use balance::*;
 pub use claude_account::*;

@@ -100,14 +100,14 @@ pub fn read_live_settings() -> Result<Value, AppError> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct AgyProjection {
-    api_key: Option<String>,
-    base_url: Option<String>,
-    model: Option<String>,
+pub(crate) struct AgyProjection {
+    pub(crate) api_key: Option<String>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) model: Option<String>,
 }
 
 impl AgyProjection {
-    fn of(settings: &Value) -> Self {
+    pub(crate) fn of(settings: &Value) -> Self {
         let env = settings.get("env");
         let api_key = non_empty(env_string(env, "GEMINI_API_KEY"));
         let base_url = non_empty(env_string(env, "GOOGLE_GEMINI_BASE_URL"));

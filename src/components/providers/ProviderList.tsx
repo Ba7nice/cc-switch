@@ -93,6 +93,8 @@ interface ProviderListProps {
   onConfigureUsage?: (provider: Provider) => void;
   onOpenWebsite: (url: string) => void;
   onOpenTerminal?: (provider: Provider) => void;
+  /** 用这张卡的配置启动 Antigravity IDE（仅 agy 页传入） */
+  onLaunchIde?: (provider: Provider) => void;
   onCreate?: () => void;
   /** OpenClaw 的默认模型、Hermes 的当前供应商 */
   onSetAsDefault?: (provider: Provider, modelId?: string) => void;
@@ -122,6 +124,7 @@ export function ProviderList({
   onDuplicate,
   onConfigureUsage,
   onOpenWebsite,
+  onLaunchIde,
   onOpenTerminal,
   onCreate,
   onSetAsDefault,
@@ -602,6 +605,7 @@ export function ProviderList({
           ? undefined
           : onOpenTerminal
       }
+      onLaunchIde={onLaunchIde}
       onTest={handleTest}
       isTesting={isChecking(provider.id)}
     />
@@ -766,6 +770,7 @@ interface SortableProviderCardProps {
   onConfigureUsage: (provider: Provider) => void;
   onOpenWebsite: (url: string) => void;
   onOpenTerminal?: (provider: Provider) => void;
+  onLaunchIde?: (provider: Provider) => void;
   onTest?: (provider: Provider) => void;
   isTesting: boolean;
 }

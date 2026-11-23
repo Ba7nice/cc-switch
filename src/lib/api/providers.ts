@@ -48,6 +48,21 @@ export interface OpenTerminalOptions {
   agyUseCurrentLogin?: boolean;
 }
 
+/** Antigravity IDE 的接管状态（由 src-tauri/src/agy_ide.rs 返回） */
+export interface AgyIdeStatus {
+  /** 当前平台是否支持接管 */
+  supported: boolean;
+  /** 是否找到了 Antigravity IDE 的 language_server */
+  installed: boolean;
+  version?: string | null;
+  root?: string | null;
+  binary?: string | null;
+  launcher?: string | null;
+  /** 是否已把 language_server 换成本项目的启动包装脚本 */
+  wrapperInstalled: boolean;
+  running: boolean;
+}
+
 export interface ClaudeDesktopStatus {
   supported: boolean;
   /** 本机装了 Claude Desktop（按它的数据目录或 macOS 应用包推断；接入了也算） */
@@ -247,6 +262,26 @@ export const providersApi = {
       extraArgs,
       agyUseCurrentLogin,
     });
+  },
+
+  /** 查询 Antigravity IDE 的接管状态 */
+  async agyIdeStatus(): Promise<AgyIdeStatus> {
+    return await invoke("agy_ide_status");
+  },
+
+  /** 启用接管：备份 language_server 并换成注入模型的包装脚本 */
+  async installAgyIdeWrapper(): Promise<AgyIdeStatus> {
+    return await invoke("agy_ide_install_wrapper");
+  },
+
+  /** 移除接管：还原原始的 language_server */
+  async uninstallAgyIdeWrapper(): Promise<AgyIdeStatus> {
+    return await invoke("agy_ide_uninstall_wrapper");
+  },
+
+  /** 用指定供应商的配置启动 Antigravity IDE */
+  async launchAgyIde(providerId: string): Promise<void> {
+    await invoke("agy_ide_launch", { providerId });
   },
 
   /**

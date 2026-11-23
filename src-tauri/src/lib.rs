@@ -1,4 +1,5 @@
 mod agy_config;
+mod agy_ide;
 #[cfg(all(test, unix))]
 mod agy_smoke_tests;
 mod app_config;
@@ -1835,6 +1836,11 @@ pub fn run() {
             commands::list_tool_installations,
             // Provider terminal
             commands::open_provider_terminal,
+            // Antigravity IDE takeover
+            commands::agy_ide_status,
+            commands::agy_ide_install_wrapper,
+            commands::agy_ide_uninstall_wrapper,
+            commands::agy_ide_launch,
             // Universal Provider management
             commands::get_universal_providers,
             commands::upsert_universal_provider,
