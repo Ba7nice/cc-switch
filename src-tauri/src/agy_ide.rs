@@ -116,13 +116,23 @@ pub async fn launch_with_args(
     let settings = crate::services::provider::agy_direct::live_settings(provider)
         .map_err(|error| error.to_string())?;
     let mut plan = plan_launch(&settings, official)?;
+    let mut bridge = None;
     if let Some(reasoning) = plan.reasoning.take() {
+        let upstream = reasoning.upstream.clone();
+        let api_key = reasoning.api_key.clone();
+        let model = reasoning.model.clone();
         let proxy = crate::agy_reasoning::ensure(reasoning).await?;
         for (key, value) in &mut plan.env {
             if *key == "GOOGLE_GEMINI_BASE_URL" {
                 *value = Some(proxy.clone());
             }
         }
+        bridge = Some(crate::agy_plugins_boot::BridgeConfig {
+            proxy_url: proxy,
+            upstream,
+            api_key,
+            model,
+        });
     }
 
     let launcher = install
@@ -132,7 +142,7 @@ pub async fn launch_with_args(
 
     log::info!("Antigravity IDE: 从供应商卡片启动，模型 {:?}", plan.model);
     let child = spawn_ide(&launcher, &plan.env, extra_args)?;
-    crate::agy_plugins_boot::watch(started_at);
+    crate::agy_plugins_boot::watch(started_at, bridge);
     Ok(child)
 }
 
@@ -207,14 +217,16 @@ fn plan_launch(settings: &Value, official: bool) -> Result<LaunchPlan, String> {
     let model = projection
         .model
         .ok_or_else(|| "这张卡片没有模型名（config.model.name 或 GEMINI_MODEL）".to_string())?;
-    // 只有显式选择了低/中/高才起代理；auto 保持原来的直连行为。
-    let reasoning =
-        crate::agy_reasoning::depth_of(settings).map(|depth| crate::agy_reasoning::Settings {
-            upstream: base_url.clone(),
-            api_key: api_key.clone(),
-            model: model.clone(),
-            depth,
-        });
+    // 代理同时负责应用内模型/推理切换与深度改写，所以 Key 卡总是经过代理；
+    // 未显式配置深度时用 medium，应用内选择会覆盖它。
+    let depth = crate::agy_reasoning::depth_of(settings)
+        .unwrap_or(crate::agy_reasoning::ThinkingDepth::Medium);
+    let reasoning = Some(crate::agy_reasoning::Settings {
+        upstream: base_url.clone(),
+        api_key: api_key.clone(),
+        model: model.clone(),
+        depth,
+    });
     Ok(LaunchPlan {
         env: vec![
             ("GEMINI_API_KEY", Some(api_key)),

@@ -7,7 +7,8 @@
 //! 这里在 IDE 启动后立刻读一次 flags：只有确认首帧为空时才继续等待，等 flags
 //! 就绪后通过 Electron 的 DevTools 协议刷新页面一次。不会重启 IDE 或语言服务器。
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -18,13 +19,22 @@ const FLAGS_PATH: &str = "/exa.language_server_pb.LanguageServerService/GetMende
 const CSRF_HEADER: &str = "x-codeium-csrf-token";
 const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
+/// 启动注入所需的供应商信息。模型列表在启动线程里实时拉取。
+#[derive(Clone, Debug)]
+pub struct BridgeConfig {
+    pub proxy_url: String,
+    pub upstream: String,
+    pub api_key: String,
+    pub model: String,
+}
+
 /// 启动一个后台自检线程。`started_at` 必须是拉起 IDE 之前的时间。
-pub fn watch(started_at: SystemTime) {
+pub fn watch(started_at: SystemTime, bridge: Option<BridgeConfig>) {
     let _ = std::thread::Builder::new()
         .name("agy-plugin-boot".into())
         .spawn(move || {
             log("插件 UI 自检线程启动");
-            match std::panic::catch_unwind(|| run(started_at)) {
+            match std::panic::catch_unwind(|| run(started_at, bridge)) {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => log(&format!("插件 UI 自检未完成: {error}")),
                 Err(payload) => {
@@ -39,31 +49,36 @@ pub fn watch(started_at: SystemTime) {
         });
 }
 
-fn run(started_at: SystemTime) -> Result<(), String> {
+fn run(started_at: SystemTime, bridge: Option<BridgeConfig>) -> Result<(), String> {
     let hub = wait_for_hub(started_at, Duration::from_secs(25))?;
     let (http_port, csrf) = read_hub(&hub)?;
+
     let first = flags_count(http_port, &csrf)?;
     if first > 0 {
-        log(&format!("插件 flags 首帧已就绪（{first} 项），无需刷新"));
-        return Ok(());
+        log(&format!("插件 flags 首帧已就绪（{first} 项）"));
+    } else {
+        log("插件 flags 首帧为空，等待语言服务器同步");
+        let mut ready = 0;
+        for _ in 0..90 {
+            std::thread::sleep(Duration::from_secs(2));
+            match flags_count(http_port, &csrf) {
+                Ok(count) if count > 0 => {
+                    ready = count;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if ready == 0 {
+            return Err("等待插件 flags 超时（180 秒）".to_string());
+        }
+        log(&format!("插件 flags 已就绪（{ready} 项）"));
     }
 
-    log("插件 flags 首帧为空，等待语言服务器同步");
-    let mut ready = 0;
-    for _ in 0..90 {
-        std::thread::sleep(Duration::from_secs(2));
-        match flags_count(http_port, &csrf) {
-            Ok(count) if count > 0 => {
-                ready = count;
-                break;
-            }
-            _ => {}
-        }
+    if bridge.is_none() && first > 0 {
+        log("页面已有扩展入口，无需刷新");
+        return Ok(());
     }
-    if ready == 0 {
-        return Err("等待插件 flags 超时（180 秒）".to_string());
-    }
-    log(&format!("插件 flags 已就绪（{ready} 项），检查页面"));
 
     let devtools_port = wait_for_devtools(started_at, Duration::from_secs(20))?;
     log(&format!("DevTools 端口 {devtools_port}，查找页面 target"));
@@ -71,6 +86,28 @@ fn run(started_at: SystemTime) -> Result<(), String> {
     log("已找到页面 target，检查扩展入口");
     let has_extensions = cdp_has_extensions(&ws_url)?;
     log(&format!("页面扩展入口: {has_extensions}"));
+
+    if let Some(bridge) = bridge {
+        match fetch_provider_models(&bridge) {
+            Ok(models) => {
+                let script = build_bridge_script(&bridge, &models);
+                log(&format!(
+                    "注入应用内模型选择器：{} 个供应商模型，override {}，控制端点 {}",
+                    models.len(),
+                    bridge.model,
+                    bridge.proxy_url
+                ));
+                // 注入脚本 + reload 同时解决 flags 首帧问题和模型列表桥接；随后保持
+                // DevTools 会话存活，页面再次 reload 时脚本仍然有效。
+                match cdp_inject_and_hold(&ws_url, &script) {
+                    Ok(()) => return Ok(()),
+                    Err(error) => log(&format!("模型桥接注入失败，退回插件自检: {error}")),
+                }
+            }
+            Err(error) => log(&format!("获取供应商模型失败，退回插件自检: {error}")),
+        }
+    }
+
     if has_extensions {
         log("页面已有扩展入口，跳过刷新");
         return Ok(());
@@ -78,6 +115,244 @@ fn run(started_at: SystemTime) -> Result<(), String> {
     cdp_reload(&ws_url)?;
     log("已刷新 Antigravity 页面，插件入口随 flags 恢复");
     Ok(())
+}
+
+struct ModelChoice {
+    name: String,
+    display: String,
+}
+
+fn models_url(upstream: &str) -> String {
+    let mut base = upstream.trim_end_matches('/').to_string();
+    for suffix in ["/v1beta", "/v1"] {
+        if let Some(stripped) = base.strip_suffix(suffix) {
+            base = stripped.to_string();
+            break;
+        }
+    }
+    format!("{base}/v1beta/models?pageSize=1000")
+}
+
+fn clean_label(display: &str, fallback: &str) -> String {
+    let mut label = display.trim();
+    for suffix in [" (Low)", " (Medium)", " (High)", " (XHigh)"] {
+        if let Some(stripped) = label.strip_suffix(suffix) {
+            label = stripped;
+            break;
+        }
+    }
+    if label.is_empty() {
+        fallback.to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+fn fetch_provider_models(bridge: &BridgeConfig) -> Result<Vec<ModelChoice>, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("创建模型列表客户端失败: {error}"))?;
+    let url = models_url(&bridge.upstream);
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", bridge.api_key))
+        .header("x-goog-api-key", &bridge.api_key)
+        .send()
+        .map_err(|error| format!("请求供应商模型列表失败: {error}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .map_err(|error| format!("读取供应商模型列表失败: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "供应商模型列表 HTTP {status}: {}",
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|error| format!("解析供应商模型列表失败: {error}"))?;
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "供应商模型列表缺少 models 数组".to_string())?;
+    let mut seen = BTreeSet::new();
+    let mut choices = Vec::new();
+    for model in models {
+        let name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches("models/")
+            .to_string();
+        if name.is_empty() || !seen.insert(name.clone()) {
+            continue;
+        }
+        let display = model
+            .get("displayName")
+            .and_then(Value::as_str)
+            .map(|display| clean_label(display, &name))
+            .unwrap_or_else(|| name.clone());
+        choices.push(ModelChoice { name, display });
+    }
+    if choices.is_empty() {
+        return Err("供应商没有返回任何模型".to_string());
+    }
+    Ok(prefer_configured_model(choices, &bridge.model))
+}
+
+fn prefer_configured_model(mut choices: Vec<ModelChoice>, preferred: &str) -> Vec<ModelChoice> {
+    let preferred = preferred.trim_start_matches("models/");
+    if let Some(index) = choices.iter().position(|choice| choice.name == preferred) {
+        let choice = choices.remove(index);
+        choices.insert(0, choice);
+    }
+    choices
+}
+
+fn stable_model_id(name: &str) -> i64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in name.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let base = 100_000 + (hash % 500_000_000) as i64;
+    base * 3
+}
+
+fn build_bridge_script(bridge: &BridgeConfig, models: &[ModelChoice]) -> String {
+    let efforts = ["Low", "Medium", "High"];
+    let mut configs = Vec::new();
+    let mut labels = Vec::new();
+    let mut selection = Map::new();
+    for model in models {
+        let base = stable_model_id(&model.name);
+        for (level, effort) in efforts.iter().enumerate() {
+            let id = base + level as i64;
+            let label = format!("{} ({effort})", model.display);
+            configs.push(json!({
+                "label": label,
+                "modelOrAlias": { "model": id },
+                "supportedMimeTypes": {},
+                "contextWindowOptions": [],
+                "disabled": false
+            }));
+            labels.push(label);
+            selection.insert(
+                id.to_string(),
+                json!({ "model": model.name, "effort": effort.to_lowercase() }),
+            );
+        }
+    }
+    let config = json!({
+        "configs": configs,
+        "sorts": [{
+            "name": "recommended",
+            "groups": [{ "groupName": "Gemini", "modelLabels": labels }]
+        }]
+    });
+    let config_json = config.to_string();
+    let selection_json = Value::Object(selection).to_string();
+    let select_url = Value::String(format!(
+        "{}/__ccswitch_select",
+        bridge.proxy_url.trim_end_matches('/')
+    ))
+    .to_string();
+
+    let mut script = String::new();
+    script.push_str("(() => {\n  if (window.__ccModelBridge) return;\n  const CFG = ");
+    script.push_str(&config_json);
+    script.push_str(";\n  const MAP = ");
+    script.push_str(&selection_json);
+    script.push_str(";\n  const SELECT_URL = ");
+    script.push_str(&select_url);
+    script.push_str(
+        r#";
+  window.__ccModelBridge = true;
+  window.__ccBridge = { req: 0, sel: 0, err: null, last: null, patched: true };
+  window.__ccGrpcHit = { req: 0, rew: 0, err: null };
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const orig = window.fetch.bind(window);
+  function decodeFrame(bytes) {
+    if (bytes.length < 5) throw new Error('short frame');
+    const len = ((bytes[1] << 24) | (bytes[2] << 16) | (bytes[3] << 8) | bytes[4]) >>> 0;
+    if (5 + len > bytes.length) throw new Error('bad frame length');
+    return { json: JSON.parse(dec.decode(bytes.slice(5, 5 + len))), tail: bytes.slice(5 + len) };
+  }
+  function encodeFrame(jsonValue, tail) {
+    const body = enc.encode(JSON.stringify(jsonValue));
+    const out = new Uint8Array(5 + body.length + (tail ? tail.length : 0));
+    out[0] = 0;
+    out[1] = (body.length >>> 24) & 255;
+    out[2] = (body.length >>> 16) & 255;
+    out[3] = (body.length >>> 8) & 255;
+    out[4] = body.length & 255;
+    out.set(body, 5);
+    if (tail && tail.length) out.set(tail, 5 + body.length);
+    return out;
+  }
+  async function publish(sel) {
+    try {
+      await fetch(SELECT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sel)
+      });
+    } catch (error) {
+      window.__ccBridge.err = String(error);
+    }
+  }
+  window.fetch = async function (input, init) {
+    let req;
+    try { req = new Request(input, init); } catch (error) { return orig(input, init); }
+    const url = req.url || '';
+    if (/SendUserCascadeMessage/.test(url)) {
+      window.__ccBridge.req++;
+      try {
+        const frame = decodeFrame(new Uint8Array(await req.clone().arrayBuffer()));
+        const planner = frame.json.cascadeConfig && frame.json.cascadeConfig.plannerConfig;
+        const key = planner && planner.planModel;
+        const sel = MAP[String(key)];
+        if (sel && planner) {
+          window.__ccBridge.sel++;
+          window.__ccBridge.last = { key: key, sel: sel };
+          await publish(sel);
+          planner.planModel = 'MODEL_GOOGLE_GEMINI_INTERNAL_BYOM';
+        }
+        return orig(new Request(req, { body: encodeFrame(frame.json, frame.tail) }));
+      } catch (error) {
+        window.__ccBridge.err = String(error);
+        return orig(req);
+      }
+    }
+    if (!/GetUserStatus/.test(url)) return orig(req);
+    const res = await orig(req);
+    window.__ccGrpcHit.req++;
+    try {
+      const frame = decodeFrame(new Uint8Array(await res.clone().arrayBuffer()));
+      frame.json.userStatus = frame.json.userStatus || {};
+      frame.json.userStatus.cascadeModelConfigData = Object.assign(
+        {}, frame.json.userStatus.cascadeModelConfigData, {
+          clientModelConfigs: CFG.configs,
+          clientModelSorts: CFG.sorts
+        });
+      window.__ccGrpcHit.rew++;
+      return new Response(encodeFrame(frame.json, frame.tail), {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers
+      });
+    } catch (error) {
+      window.__ccGrpcHit.err = String(error);
+      return res;
+    }
+  };
+})();
+"#,
+    );
+    script
 }
 
 fn wait_for_hub(started_at: SystemTime, timeout: Duration) -> Result<PathBuf, String> {
@@ -327,7 +602,7 @@ fn cdp_reload(ws_url: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cdp_request(ws_url: &str, message: &str) -> Result<Value, String> {
+fn cdp_open(ws_url: &str) -> Result<TcpStream, String> {
     let (host, port, path) = split_ws_url(ws_url)?;
     let mut stream = TcpStream::connect((host.as_str(), port))
         .map_err(|error| format!("连接 DevTools 失败: {error}"))?;
@@ -360,6 +635,51 @@ fn cdp_request(ws_url: &str, message: &str) -> Result<Value, String> {
             handshake.lines().next().unwrap_or_default()
         ));
     }
+    Ok(stream)
+}
+
+fn cdp_call(stream: &mut TcpStream, id: u64, method: &str, params: Value) -> Result<Value, String> {
+    let message = json!({ "id": id, "method": method, "params": params }).to_string();
+    write_ws_text(stream, &message)?;
+    loop {
+        let text = read_ws_text(stream)?;
+        let value: Value =
+            serde_json::from_str(&text).map_err(|error| format!("解析 CDP 响应失败: {error}"))?;
+        if value.get("id").and_then(Value::as_u64) == Some(id) {
+            return Ok(value);
+        }
+    }
+}
+
+fn cdp_inject_and_hold(ws_url: &str, source: &str) -> Result<(), String> {
+    let mut stream = cdp_open(ws_url)?;
+    for (id, method, params) in [
+        (1, "Page.enable", json!({})),
+        (
+            2,
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": source }),
+        ),
+        (3, "Page.reload", json!({ "ignoreCache": false })),
+    ] {
+        let response = cdp_call(&mut stream, id, method, params)?;
+        if let Some(error) = response.get("error") {
+            return Err(format!("CDP {method} 失败: {error}"));
+        }
+    }
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3600)))
+        .map_err(|error| format!("设置 DevTools 保活超时失败: {error}"))?;
+    loop {
+        match read_ws_text(&mut stream) {
+            Ok(_) => {}
+            Err(error) => return Err(format!("DevTools 注入会话结束: {error}")),
+        }
+    }
+}
+
+fn cdp_request(ws_url: &str, message: &str) -> Result<Value, String> {
+    let mut stream = cdp_open(ws_url)?;
     write_ws_text(&mut stream, message)?;
     let response = read_ws_text(&mut stream)?;
     serde_json::from_str(&response).map_err(|error| format!("解析 CDP 响应失败: {error}"))
@@ -526,5 +846,75 @@ mod tests {
             flags_count_from_body("{\"experimentConfig\":{}}").unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn builds_models_url_without_duplicate_version() {
+        assert_eq!(
+            models_url("https://runapi.host/v1beta"),
+            "https://runapi.host/v1beta/models?pageSize=1000"
+        );
+        assert_eq!(
+            models_url("https://runapi.host/"),
+            "https://runapi.host/v1beta/models?pageSize=1000"
+        );
+    }
+
+    #[test]
+    fn cleans_effort_suffix_from_display_name() {
+        assert_eq!(clean_label("Gemini 4 Neon (High)", "x"), "Gemini 4 Neon");
+        assert_eq!(clean_label("  ", "gemini-4-neon"), "gemini-4-neon");
+    }
+
+    #[test]
+    fn prefers_configured_model() {
+        let choices = vec![
+            ModelChoice {
+                name: "gemini-2.5-flash".to_string(),
+                display: "Gemini 2.5 Flash".to_string(),
+            },
+            ModelChoice {
+                name: "gemini-4-neon".to_string(),
+                display: "Gemini 4 Neon".to_string(),
+            },
+        ];
+        let ordered = prefer_configured_model(choices, "models/gemini-4-neon");
+        assert_eq!(ordered[0].name, "gemini-4-neon");
+    }
+
+    #[test]
+    fn model_ids_are_stable_across_order() {
+        let first = stable_model_id("gemini-4-neon");
+        let second = stable_model_id("gemini-4-neon");
+        assert_eq!(first, second);
+        assert_ne!(first, stable_model_id("gemini-4-carbon"));
+        assert!(first < i64::from(i32::MAX));
+    }
+
+    #[test]
+    fn bridge_script_contains_models_and_select_endpoint() {
+        let bridge = BridgeConfig {
+            proxy_url: "http://127.0.0.1:5000".to_string(),
+            upstream: "https://runapi.host".to_string(),
+            api_key: "secret".to_string(),
+            model: "gemini-4-neon".to_string(),
+        };
+        let models = vec![
+            ModelChoice {
+                name: "gemini-4-neon".to_string(),
+                display: "Gemini 4 Neon".to_string(),
+            },
+            ModelChoice {
+                name: "gemini-4-carbon".to_string(),
+                display: "Gemini 4 Carbon".to_string(),
+            },
+        ];
+        let script = build_bridge_script(&bridge, &models);
+        assert!(script.contains("Gemini 4 Neon (Low)"));
+        assert!(script.contains("Gemini 4 Carbon (High)"));
+        assert!(script.contains("http://127.0.0.1:5000/__ccswitch_select"));
+        assert!(script.contains("MODEL_GOOGLE_GEMINI_INTERNAL_BYOM"));
+        assert!(script.contains("__ccModelBridge"));
+        assert!(!script.contains("secret"));
     }
 }

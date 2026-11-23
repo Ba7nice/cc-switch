@@ -9,7 +9,7 @@
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::any,
     Router,
@@ -69,6 +69,13 @@ pub fn depth_of(settings: &Value) -> Option<ThinkingDepth> {
         .and_then(ThinkingDepth::parse)
 }
 
+/// 页面内模型选择器通过本地控制端点写入的当前选择。
+#[derive(Clone, Debug)]
+pub struct Selection {
+    pub model: String,
+    pub depth: ThinkingDepth,
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     /// 真实上游地址，可带或不带 /v1beta。
@@ -82,12 +89,14 @@ pub struct Settings {
 #[derive(Clone)]
 struct Shared {
     settings: Arc<RwLock<Settings>>,
+    selection: Arc<RwLock<Option<Selection>>>,
     client: reqwest::Client,
 }
 
 struct ProxyHandle {
     base_url: String,
     settings: Arc<RwLock<Settings>>,
+    selection: Arc<RwLock<Option<Selection>>>,
 }
 
 static PROXY: OnceLock<Mutex<Option<ProxyHandle>>> = OnceLock::new();
@@ -97,7 +106,12 @@ pub async fn ensure(settings: Settings) -> Result<String, String> {
     let slot = PROXY.get_or_init(|| Mutex::new(None));
     let mut guard = slot.lock().await;
     if let Some(handle) = guard.as_ref() {
+        let previous = handle.settings.read().await.clone();
+        let reset = previous.model != settings.model || previous.upstream != settings.upstream;
         *handle.settings.write().await = settings;
+        if reset {
+            *handle.selection.write().await = None;
+        }
         return Ok(handle.base_url.clone());
     }
 
@@ -112,11 +126,14 @@ pub async fn ensure(settings: Settings) -> Result<String, String> {
         .connect_timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("创建推理深度代理客户端失败: {error}"))?;
+    let selection = Arc::new(RwLock::new(None));
     let shared = Shared {
         settings: Arc::new(RwLock::new(settings)),
+        selection: selection.clone(),
         client,
     };
     let app = Router::new()
+        .route("/__ccswitch_select", any(select))
         .fallback(any(proxy))
         .with_state(shared.clone());
     tauri::async_runtime::spawn(async move {
@@ -133,8 +150,78 @@ pub async fn ensure(settings: Settings) -> Result<String, String> {
     *guard = Some(ProxyHandle {
         base_url: base_url.clone(),
         settings: shared.settings,
+        selection: shared.selection,
     });
     Ok(base_url)
+}
+
+/// 页面注入的桥接脚本在每次发送前调用这里，原子地更新当前模型与推理等级。
+/// 代理本身只监听 127.0.0.1，并允许应用页面（https://127.0.0.1:LS 端口）跨域调用。
+async fn select(State(shared): State<Shared>, request: Request) -> Response {
+    let cors = request.method() == Method::OPTIONS;
+    let result: Result<serde_json::Value, String> = if cors {
+        Ok(serde_json::json!({}))
+    } else {
+        let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+            Ok(body) => body,
+            Err(error) => {
+                return with_cors(error_response(StatusCode::BAD_REQUEST, &error.to_string()))
+            }
+        };
+        let value: Value = match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(error) => {
+                return with_cors(error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("选择内容不是 JSON: {error}"),
+                ))
+            }
+        };
+        let model = value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string);
+        let depth = value
+            .get("effort")
+            .and_then(Value::as_str)
+            .and_then(ThinkingDepth::parse);
+        match (model, depth) {
+            (Some(model), Some(depth)) => {
+                *shared.selection.write().await = Some(Selection {
+                    model: model.clone(),
+                    depth,
+                });
+                log::info!("Antigravity 模型选择已更新: {model} / {}", depth.as_str());
+                Ok(serde_json::json!({"ok": true, "model": model, "effort": depth.as_str()}))
+            }
+            _ => Err("选择缺少合法的 model 或 effort".to_string()),
+        }
+    };
+
+    match result {
+        Ok(value) => with_cors(axum::Json(value).into_response()),
+        Err(error) => with_cors(error_response(StatusCode::BAD_REQUEST, &error)),
+    }
+}
+
+fn error_response(status: StatusCode, message: &str) -> Response {
+    (status, message.to_string()).into_response()
+}
+
+fn with_cors(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        "content-type".parse().unwrap(),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        "POST, OPTIONS".parse().unwrap(),
+    );
+    response
 }
 
 async fn proxy(State(shared): State<Shared>, request: Request) -> Response {
@@ -157,23 +244,47 @@ async fn forward(shared: Shared, request: Request) -> Result<Response, String> {
         .await
         .map_err(|error| format!("读取请求体失败: {error}"))?;
     let settings = shared.settings.read().await.clone();
+    let selection = shared.selection.read().await.clone();
 
-    let path = parts
+    let mut path = parts
         .uri
         .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or_else(|| parts.uri.path());
-    let target = join_upstream(&settings.upstream, path);
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| parts.uri.path().to_string());
 
-    let mut outbound_body = body.to_vec();
+    // LS 的主模型请求路径始终是 --override_model_name；页面选择只改代理转发
+    // 的目标模型。辅助请求（如 gemini-3.1-flash-lite）保持原样。
+    let mut main_request = false;
     if let Some(model) = model_from_path(parts.uri.path()) {
         if model == settings.model {
-            if let Ok(mut value) = serde_json::from_slice::<Value>(&body) {
-                if rewrite_thinking(&mut value, settings.depth) {
-                    outbound_body = serde_json::to_vec(&value)
-                        .map_err(|error| format!("序列化请求体失败: {error}"))?;
-                }
+            main_request = true;
+            if let Some(selection) = &selection {
+                path = replace_model(&path, &settings.model, &selection.model);
             }
+        }
+    }
+
+    let target = join_upstream(&settings.upstream, &path);
+
+    let mut outbound_body = body.to_vec();
+    if main_request {
+        let depth = selection
+            .as_ref()
+            .map(|selection| selection.depth)
+            .unwrap_or(settings.depth);
+        if let Ok(mut value) = serde_json::from_slice::<Value>(&body) {
+            if rewrite_thinking(&mut value, depth) {
+                outbound_body = serde_json::to_vec(&value)
+                    .map_err(|error| format!("序列化请求体失败: {error}"))?;
+            }
+        }
+        if let Some(selection) = &selection {
+            log::info!(
+                "Antigravity 代理改写主模型请求: {} -> {} / {}",
+                settings.model,
+                selection.model,
+                selection.depth.as_str()
+            );
         }
     }
 
@@ -253,6 +364,22 @@ pub fn join_upstream(upstream: &str, path: &str) -> String {
         .or_else(|| base.strip_suffix("/v1"))
         .unwrap_or(base);
     format!("{base}{path}")
+}
+
+fn replace_model(path: &str, from: &str, to: &str) -> String {
+    let needle = format!("/models/{from}");
+    let Some(position) = path.find(&needle) else {
+        return path.to_string();
+    };
+    let rest = &path[position + needle.len()..];
+    if !(rest.is_empty() || rest.starts_with(':') || rest.starts_with('/')) {
+        return path.to_string();
+    }
+    let mut replaced = String::with_capacity(path.len() + to.len());
+    replaced.push_str(&path[..position]);
+    replaced.push_str(&format!("/models/{to}"));
+    replaced.push_str(rest);
+    replaced
 }
 
 fn model_from_path(path: &str) -> Option<String> {
@@ -357,6 +484,26 @@ mod tests {
         assert!(body
             .pointer("/generationConfig/thinkingConfig/thinkingLevel")
             .is_none());
+    }
+
+    #[test]
+    fn replaces_only_exact_model_segment() {
+        assert_eq!(
+            replace_model(
+                "/v1beta/models/gemini-4-neon:streamGenerateContent?alt=sse",
+                "gemini-4-neon",
+                "gemini-4-carbon"
+            ),
+            "/v1beta/models/gemini-4-carbon:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            replace_model(
+                "/v1beta/models/gemini-4-neon-lite:generateContent",
+                "gemini-4-neon",
+                "x"
+            ),
+            "/v1beta/models/gemini-4-neon-lite:generateContent"
+        );
     }
 
     #[test]
